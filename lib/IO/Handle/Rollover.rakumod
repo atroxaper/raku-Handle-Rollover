@@ -61,6 +61,36 @@ my class HandleHolder {
   }
 }
 
+my class TimeLimiter {
+  has Int $!interval is built;
+  has Int $!midnight-offset is built;
+  has &!ticker is built;
+
+  has atomicint $!cur-limit;
+
+  submethod TWEAK() {
+    my $time = &!ticker();
+    my $midnight = DateTime.new($time)
+      .in-timezone(DateTime.now.timezone)
+      .clone(:0hour, :0minute, :0second)
+      .posix;
+    my $l-cur-limit = $midnight + $!midnight-offset;
+    $l-cur-limit -= $!interval while $l-cur-limit > $time;
+    atomic-assign($!cur-limit, $l-cur-limit);
+  }
+
+  method cur-limit() {
+    atomic-fetch($!cur-limit);
+  }
+
+  method next-limit() {
+    my $l-cur-limit = atomic-fetch($!cur-limit);
+    my $time = &!ticker();
+    $l-cur-limit += $!interval while $l-cur-limit <= $time;
+    atomic-assign($!cur-limit, $l-cur-limit);
+  }
+}
+
 my role Rollover {
 
   method prepare-path(:$path) {
@@ -298,7 +328,57 @@ my class SizeHandleAsync is IO::Handle {
 }
 
 my class TimeHandle is IO::Handle {
+  has HandleHolder $!holder is built;
+  has &!callback is built;
+  has Rollover $!rollover is built;
+  has TimeLimiter $!limiter is built;
+  has &!ticker is built;
 
+  has atomicint $!roll = 0;
+  has atomicint $!writers = 0;
+
+  has Lock $!lock = Lock.new;
+  has $!closed = False;
+
+  submethod TWEAK() {
+    $!limiter.next-limit();
+  }
+
+  method WRITE(IO::Handle:D: Blob:D $buf --> True) {
+    loop {
+      while ⚛$!roll > 0 { }
+      $!writers⚛++;
+      try {
+        my $handle = $!holder.current-handle;
+        if &!ticker() <= $!limiter.cur-limit() {
+          $handle.WRITE($buf);
+        } else {
+          if cas($!roll, 0, 1) != 0 {
+            $!writers⚛--;
+            next;
+          }
+          my $resetted = False;
+          while ⚛$!writers != 1 { }
+          $handle.WRITE($buf);
+
+          $!holder.close($handle);
+          my $new-file = $!rollover.rollover($!holder.open-time);
+          $!holder.open;
+          $!limiter.next-limit;
+          # reset roll lock before callback to unleash other threads asap
+          $!roll ⚛= 0; $resetted = True;
+          &!callback($new-file);
+
+          LEAVE { $!roll ⚛= 0 unless $resetted }
+        }
+      }
+    }
+    $!writers⚛--;
+  }
+
+  method READ(IO::Handle:D: Int:D $bytes --> Buf:D) { Buf.new }
+
+  method EOF(IO::Handle:D: --> Bool:D) { True }
 }
 
 my class TimeHandleAsync is IO::Handle {
@@ -347,6 +427,9 @@ multi sub open(IO() $path,
         ?? OrderRollover.new(:$path, :history-size($history))
         !! TimeRollover.new(:$path, :history-size($history));
   
+  my $limiter = $max-time == 0 ?? Any !!
+    TimeLimiter.new(:interval($max-time), :$midnight-offset, :&ticker);
+  
   my $holder = HandleHolder.new(:$path, :&openner, :&closer);
 
   my $result =
@@ -356,7 +439,7 @@ multi sub open(IO() $path,
         !! TimeHandleAsync.new
       !! $max-size > 0
         ?? SizeHandle.new(:$holder, :&callback, :rollover($roller), :$max-size)
-        !! TimeHandle.new;
+        !! TimeHandle.new(:$holder, :&callback, :rollover($roller), :$limiter, :&ticker);
 
   $result.nl-out = $_ with %args<nl-out>;
   $result.encoding('bin') if %args<bin>;
