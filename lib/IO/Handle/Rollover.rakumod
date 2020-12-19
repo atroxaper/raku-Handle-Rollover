@@ -243,7 +243,58 @@ my class SizeHandle is IO::Handle {
 }
 
 my class SizeHandleAsync is IO::Handle {
+  has HandleHolder $!holder is built;
+  has &!callback is built;
+  has Rollover $!rollover is built;
+  has $!max-size is built;
 
+  has atomicint $!cur-size = 0;
+
+  has Lock $!lock = Lock.new;
+  has Channel $!channel = Channel.new;
+
+  submethod TWEAK() {
+    $!holder.open;
+    $!cur-size ⚛= $!holder.file-size;
+
+    start {
+      react {
+        whenever $!channel -> $buf {
+          my $handle = $!holder.current-handle;
+          my $buf-len = $buf.bytes;
+          my $l-cur-size = ⚛$!cur-size;
+          my $n-cur-size = $l-cur-size + $buf-len;
+          $handle.WRITE($buf);
+          if $n-cur-size >= $!max-size {
+            $!holder.close($handle);
+            my $new-file = $!rollover.rollover($!holder.open-time);
+            $!holder.open;
+            $!cur-size ⚛= $!holder.file-size;
+            &!callback($new-file);
+          }
+        }
+      }
+    }
+  }
+
+  method close(IO::Handle:D: --> True) {
+    $!lock.protect({
+      with $!channel {
+        $!holder.close;
+        my $new-file = $!rollover.rollover($!holder.open-time);
+        &!callback($new-file);
+        $!channel = Nil;
+      }
+    });
+  }
+
+  method WRITE(IO::Handle:D: Blob:D $buf --> True) {
+    $!channel.send($buf);
+  }
+
+  method READ(IO::Handle:D: Int:D $bytes --> Buf:D) { Buf.new }
+
+  method EOF(IO::Handle:D: --> Bool:D) { True }
 }
 
 my class TimeHandle is IO::Handle {
@@ -301,7 +352,7 @@ multi sub open(IO() $path,
   my $result =
     $async
       ?? $max-size > 0
-        ?? SizeHandleAsync.new
+        ?? SizeHandleAsync.new(:$holder, :&callback, :rollover($roller), :$max-size)
         !! TimeHandleAsync.new
       !! $max-size > 0
         ?? SizeHandle.new(:$holder, :&callback, :rollover($roller), :$max-size)
