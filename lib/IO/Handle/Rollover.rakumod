@@ -1,5 +1,3 @@
-my $D = False;
-
 unit module IO::Handle::Rollover;
 
 class X::IO::Handle::Rollover::WrongFileSize is Exception {
@@ -36,16 +34,15 @@ my class HandleHolder {
 
   method open() {
     my $handle = &!openner($!path);
-    my $time = $!path.changed;
+    my $time = DateTime.now;
     atomic-assign($!handle, $handle);
     atomic-assign($!open-time, $time);
     $handle
   }
 
   method close($handle?) {
-    my $h = $handle // self.current-handle();
+    my $h = $handle // atomic-fetch($!handle);
     &!closer($h) with $h;
-    Nil
   }
 
   method current-handle() {
@@ -136,17 +133,13 @@ my class OrderRollover does Rollover {
     my @exists := $!path.parent.dir
       .grep(-> $p { $p.f && $p.basename.match($!regex) })
       .sort.List;
-    @exists.tail(* - $!history-size + 1).map(-> $p { if $D {say "unlink $p"} else {$p.unlink} }) if $!history-size > 0;
+    @exists.tail(* - $!history-size + 1).map(*.unlink) if $!history-size > 0;
     for ($!history-size > 0 ?? @exists.head($!history-size - 1) !! @exists).reverse -> $p {
       $p.Str
         .subst($!regex, -> $m { "$!name" ~ '_' ~ $m.list[0].Str.succ ~ "$!ext" })
-        .map(-> $n { if $D {say "rename $p -> $n"} else {$p.rename($n)} });
+        .map( -> $n { $p.rename($n) });
     }
-    if $D {
-      say "rename $!path -> $!first-file";
-    } else {
-      $!path.rename($!first-file);
-    }
+    $!path.rename($!first-file);
     $!first-file.IO;
   }
 }
@@ -173,17 +166,13 @@ my class TimeRollover does Rollover {
         .grep(-> $p { $p.basename.match($!regex) } )
         .sort
         .head(* - $!history-size + 1)
-        .map(-> $p { if $D {say "unlink $p"} else {$p.unlink}} );
+        .map(*.unlink);
     }
     my $suffix =
       sprintf('%.4d_%.2d_%.2dT%.2d_%.2d_%.2d', .year, .month, .day, .hour, .minute, .whole-second)
       with $open-time;
     my $first-file = "$!path-name" ~ "_$suffix$!ext".IO;
-    if $D {
-      say "rename $!path -> $first-file";
-    } else {
-      $!path.rename($first-file);
-    }
+    $!path.rename($first-file);
     $first-file.IO
   }
 }
@@ -283,6 +272,19 @@ my class SizeHandleAsync is IO::Handle {
   has Lock $!lock = Lock.new;
   has Channel $!channel = Channel.new;
 
+  method close(IO::Handle:D: --> True) {
+    $!lock.protect({
+      with $!channel {
+        $!channel.close;
+        await $!channel.closed;
+        $!holder.close;
+        my $new-file = $!rollover.rollover($!holder.open-time);
+        &!callback($new-file);
+        $!channel = Nil;
+      }
+    });
+  }
+
   submethod TWEAK() {
     $!holder.open;
     $!cur-size ⚛= $!holder.file-size;
@@ -295,6 +297,7 @@ my class SizeHandleAsync is IO::Handle {
           my $l-cur-size = ⚛$!cur-size;
           my $n-cur-size = $l-cur-size + $buf-len;
           $handle.WRITE($buf);
+          $!cur-size ⚛= $n-cur-size;
           if $n-cur-size >= $!max-size {
             $!holder.close($handle);
             my $new-file = $!rollover.rollover($!holder.open-time);
@@ -305,17 +308,6 @@ my class SizeHandleAsync is IO::Handle {
         }
       }
     }
-  }
-
-  method close(IO::Handle:D: --> True) {
-    $!lock.protect({
-      with $!channel {
-        $!holder.close;
-        my $new-file = $!rollover.rollover($!holder.open-time);
-        &!callback($new-file);
-        $!channel = Nil;
-      }
-    });
   }
 
   method WRITE(IO::Handle:D: Blob:D $buf --> True) {
@@ -341,13 +333,29 @@ my class TimeHandle is IO::Handle {
   has $!closed = False;
 
   submethod TWEAK() {
+    $!holder.open;
     $!limiter.next-limit();
+  }
+
+  method close(IO::Handle:D: --> True) {
+    $!lock.protect({
+      unless $!closed {
+        $!holder.close;
+        my $new-file = $!rollover.rollover($!holder.open-time);
+        &!callback($new-file);
+        $!closed = True;
+      }
+    });
   }
 
   method WRITE(IO::Handle:D: Blob:D $buf --> True) {
     loop {
       while ⚛$!roll > 0 { }
       $!writers⚛++;
+      if ⚛$!roll > 0 {
+        $!writers⚛--;
+        next;
+      }
       try {
         my $handle = $!holder.current-handle;
         if &!ticker() <= $!limiter.cur-limit() {
@@ -361,16 +369,19 @@ my class TimeHandle is IO::Handle {
           while ⚛$!writers != 1 { }
           $handle.WRITE($buf);
 
-          $!holder.close($handle);
-          my $new-file = $!rollover.rollover($!holder.open-time);
-          $!holder.open;
-          $!limiter.next-limit;
-          # reset roll lock before callback to unleash other threads asap
-          $!roll ⚛= 0; $resetted = True;
-          &!callback($new-file);
-
-          LEAVE { $!roll ⚛= 0 unless $resetted }
+          {
+            $!holder.close($handle);
+            my $new-file = $!rollover.rollover($!holder.open-time);
+            $!holder.open;
+            $!limiter.next-limit;
+            # reset roll lock before callback to unleash other threads asap
+            $!roll ⚛= 0; $resetted = True;
+            &!callback($new-file);
+            
+            LEAVE { $!roll ⚛= 0 unless $resetted }
+          }
         }
+        last;
       }
     }
     $!writers⚛--;
@@ -382,7 +393,56 @@ my class TimeHandle is IO::Handle {
 }
 
 my class TimeHandleAsync is IO::Handle {
+  has HandleHolder $!holder is built;
+  has &!callback is built;
+  has Rollover $!rollover is built;
+  has TimeLimiter $!limiter is built;
+  has &!ticker is built;
 
+  has Lock $!lock = Lock.new;
+  has Channel $!channel = Channel.new;
+
+  method close(IO::Handle:D: --> True) {
+    $!lock.protect({
+      with $!channel {
+        $!channel.close;
+        await $!channel.closed;
+        $!holder.close;
+        my $new-file = $!rollover.rollover($!holder.open-time);
+        &!callback($new-file);
+        $!channel = Nil;
+      }
+    });
+  }
+
+  submethod TWEAK() {
+    $!holder.open;
+    $!limiter.next-limit();
+
+    start {
+      react {
+        whenever $!channel -> $buf {
+          my $handle = $!holder.current-handle;
+          $handle.WRITE($buf);
+          if &!ticker() > $!limiter.cur-limit() {
+            $!holder.close($handle);
+            my $new-file = $!rollover.rollover($!holder.open-time);
+            $!holder.open;
+            $!limiter.next-limit;
+            &!callback($new-file);
+          }
+        }
+      }
+    }
+  }
+
+  method WRITE(IO::Handle:D: Blob:D $buf --> True) {
+    $!channel.send($buf);
+  }
+
+  method READ(IO::Handle:D: Int:D $bytes --> Buf:D) { Buf.new }
+
+  method EOF(IO::Handle:D: --> Bool:D) { True }
 }
 
 my sub size-bytes(Str $size) {
@@ -416,9 +476,14 @@ multi sub open(IO() $path,
   X::IO::Handle::Rollover::TimeOrSize.new.throw if $max-size == 0 && $max-time == 0 or $max-size > 0 && $max-time > 0;
 
   my %args = c.hash;
-  my &openner = -> $path { open($path, |%args) };
-  my &closer = -> $handle { $handle.close };
   my $history = max(0, $history-size);
+  my &openner = -> $path { open($path, |%args) };
+  my &closer = -> $handle {
+    $handle.close;
+    # sometimes close may fail because of race condition. try to stay a second
+    CATCH { default { sleep 1; $handle.close }}
+  };
+  
 
   my $roller = 
     (%args<truncate> // '')
@@ -436,7 +501,7 @@ multi sub open(IO() $path,
     $async
       ?? $max-size > 0
         ?? SizeHandleAsync.new(:$holder, :&callback, :rollover($roller), :$max-size)
-        !! TimeHandleAsync.new
+        !! TimeHandleAsync.new(:$holder, :&callback, :rollover($roller), :$limiter, :&ticker)
       !! $max-size > 0
         ?? SizeHandle.new(:$holder, :&callback, :rollover($roller), :$max-size)
         !! TimeHandle.new(:$holder, :&callback, :rollover($roller), :$limiter, :&ticker);

@@ -3,6 +3,8 @@ use Test;
 use lib 'lib';
 use IO::Handle::Rollover;
 
+plan 10;
+
 my $path = ($*TMPDIR ~ '/rollover/rollover.txt').IO;
 $path.parent.mkdir;
 LEAVE {
@@ -21,4 +23,4 @@ lives-ok { open($path, :rollover, :file-size<1B>, :suffix-style<time>, :w) };
 lives-ok { open($path, :rollover, :rotation-time(1), :suffix-style<order>, :w) };
 lives-ok { open($path, :rollover, :rotation-time(1), :suffix-style<time>, :w) };
 
-done-testing;
+lives-ok { open($path, :rollover, :rotation-time(1), :suffix-style<time>, ticker => -> { time }, :w) };
