@@ -1,0 +1,24 @@
+{
+  "name": "IO::Handle::Rollover",
+  "description": "IO::Handle for rolloving files (logs for example) based on its size or creation time.",
+  "version": "1.3.1",
+  "perl": "6.d",
+  "authors": [
+    "Mikhail Khorkov"
+  ],
+  "auth": "github:atroxaper",
+  "depends": [],
+  "test-depends": [
+    "Test"
+  ],
+  "provides": {
+    "IO::Handle::Rollover": "lib/IO/Handle/Rollover.rakumod"
+  },
+  "resources": [],
+  "license": "Artistic-2.0",
+  "tags": [
+    "LOG",
+    "HANDLE"
+  ],
+  "source-url": "git://github.com/atroxaper/raku-Handle-Rollover.git"
+}
