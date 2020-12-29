@@ -14,7 +14,7 @@ END {
   $path.parent.rmdir;
 }
 
-my ($max-value, $threads) = (100000, 10);
+my ($max-value, $threads) = (10000, 10);
 my $total-size = (1..$max-value).map(*.Str.chars + 1).sum * $threads;
 my $file-size = $total-size div 3;
 my atomicint $files = 0;
