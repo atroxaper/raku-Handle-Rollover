@@ -1,6 +1,6 @@
 {
   "name": "IO::Handle::Rollover",
-  "description": "IO::Handle for rolloving files (logs for example) based on its size or creation time.",
+  "description": "`IO::Handle` for rollover files (logs, for example) based on its size or creation time.",
   "version": "1.3.1",
   "perl": "6.d",
   "authors": [
