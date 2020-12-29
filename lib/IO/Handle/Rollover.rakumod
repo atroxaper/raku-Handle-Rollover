@@ -32,7 +32,7 @@ my class HandleHolder {
   has $!handle;
   has $!open-time;
 
-  method open() {
+  method open(--> IO::Handle) {
     my $handle = &!openner($!path);
     my $time = DateTime.now;
     atomic-assign($!handle, $handle);
@@ -40,12 +40,12 @@ my class HandleHolder {
     $handle
   }
 
-  method close($handle?) {
+  method close($handle? --> Nil) {
     my $h = $handle // atomic-fetch($!handle);
     &!closer($h) with $h;
   }
 
-  method current-handle() {
+  method current-handle(--> IO::Handle) {
     atomic-fetch($!handle)
   }
 
@@ -59,8 +59,8 @@ my class HandleHolder {
 }
 
 my class TimeLimiter {
-  has Int $!interval is built;
-  has Int $!midnight-offset is built;
+  has int $!interval is built;
+  has int $!midnight-offset is built;
   has &!ticker is built;
 
   has atomicint $!cur-limit;
@@ -80,7 +80,7 @@ my class TimeLimiter {
     atomic-fetch($!cur-limit);
   }
 
-  method next-limit() {
+  method next-limit(--> Nil) {
     my $l-cur-limit = atomic-fetch($!cur-limit);
     my $time = &!ticker();
     $l-cur-limit += $!interval while $l-cur-limit <= $time;
@@ -206,8 +206,9 @@ my class SizeHandle is IO::Handle {
   }
   
   method WRITE(IO::Handle:D: Blob:D $buf --> True) {
-    my $buf-len = $buf.bytes;
-    my ($n-cur-size, $l-cur-size); # new and local
+    my int $buf-len = $buf.bytes;
+    my int $n-cur-size;
+    my int $l-cur-size;
 
     loop {
       # we heed to wait rollover actions in case of current maximus is exceeded
@@ -222,14 +223,14 @@ my class SizeHandle is IO::Handle {
         $n-cur-size = $l-cur-size + $buf-len;
         # enter into write section
         if cas($!cur-size, $l-cur-size, $n-cur-size) == $l-cur-size {
-          my $handle = $!holder.current-handle;
+          my $handle := $!holder.current-handle;
           if ($n-cur-size < $!max-size) {
             # we a just writer
             $handle.WRITE($buf);
           } else {
             my $resetted = False;
             # we a rollover writer and will do rollover actions
-            my $l-writers;
+            my int $l-writers;
             # we need to wait all writers to finish writing or leave the loop
             repeat { $l-writers = ⚛$!writers } while $l-writers != 1;
             $handle.WRITE($buf);
@@ -357,7 +358,7 @@ my class TimeHandle is IO::Handle {
         next;
       }
       try {
-        my $handle = $!holder.current-handle;
+        my $handle := $!holder.current-handle;
         if &!ticker() <= $!limiter.cur-limit() {
           $handle.WRITE($buf);
         } else {
@@ -488,9 +489,13 @@ multi sub open(IO() $path,
   my $roller = 
     (%args<truncate> // '')
       ?? TruncateRollover.new(:$path)
-      !! ($suffix-style // '') eq 'order' || $max-size > 0
+      !! ($suffix-style // '') eq 'order'
         ?? OrderRollover.new(:$path, :history-size($history))
-        !! TimeRollover.new(:$path, :history-size($history));
+        !! ($suffix-style // '') eq 'time'
+          ?? TimeRollover.new(:$path, :history-size($history))
+          !! $max-size > 0
+            ?? OrderRollover.new(:$path, :history-size($history))
+            !! TimeRollover.new(:$path, :history-size($history));
   
   my $limiter = $max-time == 0 ?? Any !!
     TimeLimiter.new(:interval($max-time), :$midnight-offset, :&ticker);
@@ -513,14 +518,3 @@ multi sub open(IO() $path,
 
   $result
 }
-
-#`[
-  sub base-date(Str $time) {
-    my $n = DateTime.now;
-    given $time {
-      when 'none' { return DateTime }
-      when 'week' { return $n.ealier(day => $n.day-of-week - 1).truncated-to('day') }
-      default { return $n.truncated-to($time) }
-    }
-  }
-]
