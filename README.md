@@ -1,4 +1,4 @@
-[![Build Status](https://travis-ci.org/atroxaper/raku-Handle-Rollover.svg?branch=master)](https://travis-ci.org/atroxaper/raku-Handle-Rollover)
+[![Build Status](https://github.com/atroxaper/raku-Handle-Rollover/workflows/build/badge.svg)](https://github.com/atroxaper/raku-Handle-Rollover/actions)
 
 # NAME
 
